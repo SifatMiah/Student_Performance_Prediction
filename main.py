@@ -213,7 +213,7 @@ page = st.sidebar.radio("Go to", [
 ])
 
 
-# ════════════════ PAGE 1 — Single prediction ════════════════════
+# ════════════════ PAGE 1 — Single prediction ══════════════════════
 
 if page == "🔍 Predict a Student":
 
@@ -288,26 +288,20 @@ if page == "🔍 Predict a Student":
         if HAS_SHAP:
             st.subheader("🔍 SHAP Explanation")
             explainer   = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(row)
-            sv_fail = shap_values[0][0] if isinstance(shap_values, list) else shap_values[0]
+            shap_values = explainer(row)
 
-            base_val = (
-                explainer.expected_value[0]
-                if isinstance(explainer.expected_value, (list, np.ndarray))
-                else explainer.expected_value
-            )
-            sv_obj = shap.Explanation(
-                values=sv_fail,
-                base_values=base_val,
-                data=row.values[0],
-                feature_names=FEATURES,
-            )
+            # Handle multi-output (shape: samples × features × classes)
+            if len(shap_values.shape) == 3:
+                sv_obj = shap_values[0, :, 0]   # row 0, all features, Fail class
+            else:
+                sv_obj = shap_values[0]          # single-output fallback
+
             shap.plots.waterfall(sv_obj, max_display=12, show=False)
             st.pyplot(plt.gcf())
             plt.close("all")
 
             if label == "FAIL":
-                recs = top_recommendations(sv_fail)
+                recs = top_recommendations(sv_obj.values)
                 if recs:
                     st.subheader("📌 Teacher Recommendations")
                     for title, advice, sv in recs:
@@ -403,35 +397,204 @@ elif page == "📋 Batch Prediction":
 
 elif page == "⚖️ Fairness Audit":
 
-    st.title("⚖️ Fairness Audit — Demographic Parity")
-    st.write("Disparate Impact ≥ 0.80 satisfies the four-fifths rule.")
+    st.title("⚖️ Fairness Audit")
+    st.write(
+        "This page audits fairness at **two levels**: "
+        "(1) label-level parity on training data, and "
+        "(2) prediction-level parity + equalized odds on model outputs."
+    )
 
-    df_raw = pd.read_csv("student_habits_performance.csv")
-    df_raw["pass_fail"] = (df_raw["exam_score"] >= PASS_SCORE).astype(int)
+    # ── Tab layout for the two audit levels ──
+    tab_label, tab_pred = st.tabs([
+        "📊 Label-Level Audit (Training Data)",
+        "🔍 Prediction-Level Audit (Model Outputs)"
+    ])
 
-    for col, label in [("gender", "Gender"),
-                       ("parental_education_level", "Parental Education")]:
-        st.subheader(label)
-        grp = df_raw.groupby(col)["pass_fail"].agg(["mean", "count"])
-        grp.columns = ["Pass Rate", "Count"]
-        grp["Pass Rate %"]      = (grp["Pass Rate"] * 100).round(1)
-        grp["Disparate Impact"] = (grp["Pass Rate"] / grp["Pass Rate"].max()).round(3)
-        grp["Fair (≥0.80)?"]    = grp["Disparate Impact"].apply(
-            lambda x: "✅ Yes" if x >= 0.80 else "❌ No"
+    # ════════ TAB 1: Label-level audit (original) ════════
+    with tab_label:
+        st.subheader("Label-Level Demographic Parity")
+        st.write(
+            "Checks whether the **raw training labels** (Pass/Fail based on exam score) "
+            "are distributed fairly across demographic groups. "
+            "Disparate Impact ≥ 0.80 satisfies the four-fifths rule."
         )
-        st.dataframe(grp, use_container_width=True)
 
-        fig, ax = plt.subplots(figsize=(7, 3))
-        colors = ["#66bb6a" if v >= 0.80 else "#ef5350" for v in grp["Disparate Impact"]]
-        bars = ax.bar(grp.index, grp["Pass Rate %"], color=colors, edgecolor="white")
-        ax.axhline(80, color="black", linestyle="--", linewidth=1.2, label="80% floor")
-        ax.set_ylim(0, 105)
-        ax.set_ylabel("Pass Rate (%)")
-        ax.set_title(f"Pass Rate by {label}")
-        ax.legend()
-        for bar, val in zip(bars, grp["Pass Rate %"]):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.8,
-                    f"{val:.1f}%", ha="center", fontsize=9, fontweight="bold")
-        plt.tight_layout()
-        st.pyplot(fig)
-        st.divider()
+        df_label = pd.read_csv("student_habits_performance.csv")
+        df_label["pass_fail"] = (df_label["exam_score"] >= PASS_SCORE).astype(int)
+
+        for col, label in [("gender", "Gender"),
+                           ("parental_education_level", "Parental Education")]:
+            st.subheader(label)
+            grp = df_label.groupby(col)["pass_fail"].agg(["mean", "count"])
+            grp.columns = ["Pass Rate", "Count"]
+            grp["Pass Rate %"]      = (grp["Pass Rate"] * 100).round(1)
+            grp["Disparate Impact"] = (grp["Pass Rate"] / grp["Pass Rate"].max()).round(3)
+            grp["Fair (≥0.80)?"]    = grp["Disparate Impact"].apply(
+                lambda x: "✅ Yes" if x >= 0.80 else "❌ No"
+            )
+            st.dataframe(grp, use_container_width=True)
+
+            fig, ax = plt.subplots(figsize=(7, 3))
+            colors = ["#66bb6a" if v >= 0.80 else "#ef5350" for v in grp["Disparate Impact"]]
+            bars = ax.bar(grp.index, grp["Pass Rate %"], color=colors, edgecolor="white")
+            ax.axhline(80, color="black", linestyle="--", linewidth=1.2, label="80% floor")
+            ax.set_ylim(0, 105)
+            ax.set_ylabel("Pass Rate (%)")
+            ax.set_title(f"Pass Rate by {label} (Training Labels)")
+            ax.legend()
+            for bar, val in zip(bars, grp["Pass Rate %"]):
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.8,
+                        f"{val:.1f}%", ha="center", fontsize=9, fontweight="bold")
+            plt.tight_layout()
+            st.pyplot(fig)
+            st.divider()
+
+    # ════════ TAB 2: Prediction-level audit ════════
+    with tab_pred:
+        st.subheader("Prediction-Level Fairness Audit")
+        st.write(
+            "Upload a CSV (or use the training dataset) to check whether "
+            "**model predictions** are fair across demographic groups. "
+            "This audits the model's outputs, not just the input labels."
+        )
+
+        audit_source = st.radio(
+            "Data source for audit:",
+            ["Use training dataset", "Upload CSV"],
+            horizontal=True,
+        )
+
+        if audit_source == "Upload CSV":
+            audit_file = st.file_uploader("Upload CSV for fairness audit", type="csv", key="fairness_csv")
+            if audit_file is None:
+                st.info("👆 Upload a CSV to run prediction-level fairness audit.")
+                st.stop()
+            df_audit = pd.read_csv(audit_file)
+        else:
+            df_audit = pd.read_csv("student_habits_performance.csv")
+
+        st.success(f"Auditing **{len(df_audit)} students**")
+
+        # Run predictions
+        probs_audit, preds_audit, _ = batch_predict_with_overrides(df_audit)
+        pred_pass = (preds_audit == 0)  # 0 = predicted Pass (no fail flag)
+
+        # If actual labels available
+        has_actuals = "exam_score" in df_audit.columns
+        if has_actuals:
+            y_actual = (df_audit["exam_score"] >= PASS_SCORE).astype(int).values
+
+        for col, label in [("gender", "Gender"),
+                           ("parental_education_level", "Parental Education")]:
+            if col not in df_audit.columns:
+                st.warning(f"Column `{col}` not found in data — skipping {label} audit.")
+                continue
+
+            st.subheader(f"🔍 {label} — Prediction-Level")
+            groups = df_audit[col].dropna().unique()
+            group_vals = df_audit[col].values
+
+            rows = []
+            for g in sorted(groups):
+                mask = group_vals == g
+                n = int(mask.sum())
+                pred_pass_rate = float(pred_pass[mask].mean())
+
+                row_data = {
+                    "Group": g,
+                    "N": n,
+                    "Pred Pass Rate %": round(pred_pass_rate * 100, 1),
+                }
+
+                if has_actuals:
+                    y_true_g = y_actual[mask]
+                    y_pred_g = preds_audit[mask]
+
+                    # TPR for Fail: of actual Fails, how many caught?
+                    actual_fail_mask = (y_true_g == 0)
+                    if actual_fail_mask.sum() > 0:
+                        tpr = float(((y_pred_g == 1) & actual_fail_mask).sum() / actual_fail_mask.sum())
+                    else:
+                        tpr = None
+
+                    # FPR: of actual Pass, how many wrongly flagged?
+                    actual_pass_mask = (y_true_g == 1)
+                    if actual_pass_mask.sum() > 0:
+                        fpr = float(((y_pred_g == 1) & actual_pass_mask).sum() / actual_pass_mask.sum())
+                    else:
+                        fpr = None
+
+                    row_data["TPR (Fail Recall)"] = f"{tpr:.3f}" if tpr is not None else "N/A"
+                    row_data["FPR"] = f"{fpr:.3f}" if fpr is not None else "N/A"
+
+                rows.append(row_data)
+
+            result_df = pd.DataFrame(rows).set_index("Group")
+
+            # Demographic Parity
+            pred_rates = [float(r["Pred Pass Rate %"]) / 100 for r in rows]
+            max_rate = max(pred_rates)
+            min_rate = min(pred_rates)
+            if max_rate > 0:
+                di_ratio = min_rate / max_rate
+                result_df["Disparate Impact"] = [
+                    round(float(r["Pred Pass Rate %"]) / 100 / max_rate, 3) for r in rows
+                ]
+                result_df["Fair (≥0.80)?"] = result_df["Disparate Impact"].apply(
+                    lambda x: "✅ Yes" if x >= 0.80 else "❌ No"
+                )
+
+            st.dataframe(result_df, use_container_width=True)
+
+            # Summary metrics
+            dpd = max_rate - min_rate
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Demographic Parity Diff", f"{dpd:.4f}")
+            if max_rate > 0:
+                col2.metric("Disparate Impact Ratio", f"{di_ratio:.3f}",
+                           delta="Fair" if di_ratio >= 0.80 else "Unfair",
+                           delta_color="normal" if di_ratio >= 0.80 else "inverse")
+
+            if has_actuals:
+                # Equalized Odds
+                tpr_vals = []
+                fpr_vals = []
+                for r in rows:
+                    if r.get("TPR (Fail Recall)") and r["TPR (Fail Recall)"] != "N/A":
+                        tpr_vals.append(float(r["TPR (Fail Recall)"]))
+                    if r.get("FPR") and r["FPR"] != "N/A":
+                        fpr_vals.append(float(r["FPR"]))
+
+                if len(tpr_vals) >= 2 and len(fpr_vals) >= 2:
+                    tpr_diff = max(tpr_vals) - min(tpr_vals)
+                    fpr_diff = max(fpr_vals) - min(fpr_vals)
+                    eod = max(tpr_diff, fpr_diff)
+                    col3.metric("Equalized Odds Diff", f"{eod:.4f}")
+
+            # Bar chart
+            fig, ax = plt.subplots(figsize=(7, 3))
+            x_labels = [r["Group"] for r in rows]
+            x_vals = [float(r["Pred Pass Rate %"]) for r in rows]
+            di_vals = result_df["Disparate Impact"].values if "Disparate Impact" in result_df.columns else [1.0]*len(rows)
+            colors = ["#66bb6a" if v >= 0.80 else "#ef5350" for v in di_vals]
+            bars = ax.bar(x_labels, x_vals, color=colors, edgecolor="white")
+            ax.axhline(80, color="black", linestyle="--", linewidth=1.2, label="80% floor")
+            ax.set_ylim(0, 105)
+            ax.set_ylabel("Predicted Pass Rate (%)")
+            ax.set_title(f"Predicted Pass Rate by {label} (Model Outputs)")
+            ax.legend()
+            for bar, val in zip(bars, x_vals):
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.8,
+                        f"{val:.1f}%", ha="center", fontsize=9, fontweight="bold")
+            plt.tight_layout()
+            st.pyplot(fig)
+            st.divider()
+
+        st.info(
+            "**Equalized Odds** checks whether the model catches Fail students (TPR) "
+            "and incorrectly flags Pass students (FPR) at equal rates across groups. "
+            "Large differences indicate the model may be unfair to certain groups."
+        )
+
+
+
